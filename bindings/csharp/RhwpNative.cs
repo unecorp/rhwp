@@ -297,6 +297,96 @@ public static class RhwpSession
     /// </remarks>
     public static string Structure(ulong handle) => TakeResultString(rhwp_document_structure(handle));
 
+    /// <summary>
+    /// 표 칸의 글자를 통째로 바꾼다. 칸은 <b>행·열</b>로 지목한다.
+    /// </summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <param name="section">구역 인덱스.</param>
+    /// <param name="paragraph">표를 담은 본문 문단.</param>
+    /// <param name="control">그 문단 안에서 표가 몇 번째 컨트롤인지.</param>
+    /// <param name="row">행 번호.</param>
+    /// <param name="col">열 번호.</param>
+    /// <param name="text">넣을 글. 빈 문자열이면 칸을 비운다.</param>
+    /// <returns>결과 JSON.</returns>
+    /// <remarks>
+    /// 자리표시자를 누름틀이 아니라 글자로 두는 서식에서 표를 채우는 통로다.
+    /// <see cref="SetField"/> 는 쓸 수 없고, 칸이 아예 비어 있는 서식도 흔하다 —
+    /// 그때는 바꿀 누름틀조차 없다.
+    /// <para>
+    /// <b>칸 순번이 아니라 행·열로 받는다.</b> <c>Table.cells</c> 의 순번은 행·열이
+    /// 아니며 <c>row * colCount + col</c> 이라는 가정은 병합 하나로 깨진다. 그 계산을
+    /// 부르는 쪽에 맡기면 병합된 서식에서 조용히 엉뚱한 칸을 채운다.
+    /// </para>
+    /// <para>
+    /// 새 글자는 <see cref="ReplaceText"/> 와 같은 이유로 <b>넣고 나서 지우는</b> 순서를
+    /// 거쳐 원래 글자의 모양을 물려받는다.
+    /// </para>
+    /// </remarks>
+    public static string SetCellText(
+        ulong handle, uint section, uint paragraph, uint control, uint row, uint col, string text) =>
+        TakeResultString(rhwp_document_set_cell_text(
+            handle, section, paragraph, control, row, col, ToUtf8(text)));
+
+    /// <summary>표에서 행 하나를 지운다.</summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <param name="section">구역 인덱스.</param>
+    /// <param name="paragraph">표를 담은 본문 문단.</param>
+    /// <param name="control">그 문단 안에서 표가 몇 번째 컨트롤인지.</param>
+    /// <param name="row">지울 행.</param>
+    /// <returns>결과 JSON.</returns>
+    /// <remarks>
+    /// <see cref="DuplicateTableRow"/> 의 짝이다. 서식이 자료 행을 몇 벌 갖춰 두었는데
+    /// 이번 문서가 그보다 적게 쓰면 빈 행이 남는다. 여러 개를 지울 때는 <b>인덱스가
+    /// 큰 것부터</b> 지워야 앞쪽 인덱스가 밀리지 않는다.
+    /// </remarks>
+    public static string DeleteTableRow(
+        ulong handle, uint section, uint paragraph, uint control, uint row) =>
+        TakeResultString(rhwp_document_delete_table_row(handle, section, paragraph, control, row));
+
+    /// <summary>표에 열 하나를 끼운다.</summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <param name="section">구역 인덱스.</param>
+    /// <param name="paragraph">표를 담은 본문 문단.</param>
+    /// <param name="control">그 문단 안에서 표가 몇 번째 컨트롤인지.</param>
+    /// <param name="col">기준 열.</param>
+    /// <param name="right">참이면 기준 열의 오른쪽에 끼운다.</param>
+    /// <returns>결과 JSON.</returns>
+    /// <remarks>
+    /// 새 열은 이웃 열의 서식과 <b>폭까지</b> 물려받으므로 표 전체가 그만큼 넓어진다.
+    /// 원래 폭으로 되돌리려면 <see cref="SetTableColumnWidths"/> 로 다시 나눈다.
+    /// </remarks>
+    public static string InsertTableColumn(
+        ulong handle, uint section, uint paragraph, uint control, uint col, bool right) =>
+        TakeResultString(rhwp_document_insert_table_column(
+            handle, section, paragraph, control, col, right));
+
+    /// <summary>표에서 열 하나를 지운다.</summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <param name="section">구역 인덱스.</param>
+    /// <param name="paragraph">표를 담은 본문 문단.</param>
+    /// <param name="control">그 문단 안에서 표가 몇 번째 컨트롤인지.</param>
+    /// <param name="col">지울 열.</param>
+    /// <returns>결과 JSON.</returns>
+    public static string DeleteTableColumn(
+        ulong handle, uint section, uint paragraph, uint control, uint col) =>
+        TakeResultString(rhwp_document_delete_table_column(handle, section, paragraph, control, col));
+
+    /// <summary>표의 열 폭을 다시 나눈다.</summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <param name="section">구역 인덱스.</param>
+    /// <param name="paragraph">표를 담은 본문 문단.</param>
+    /// <param name="control">그 문단 안에서 표가 몇 번째 컨트롤인지.</param>
+    /// <param name="widths">열 순서대로의 폭(HWPUNIT).</param>
+    /// <returns>결과 JSON.</returns>
+    /// <remarks>
+    /// 열을 끼우거나 지운 뒤 표를 원래 폭으로 되돌리는 데 쓴다. 그대로 두면 표가
+    /// 쪽 밖으로 삐져나간다.
+    /// </remarks>
+    public static string SetTableColumnWidths(
+        ulong handle, uint section, uint paragraph, uint control, uint[] widths) =>
+        TakeResultString(rhwp_document_set_table_column_widths(
+            handle, section, paragraph, control, ToUtf8(string.Join(",", widths))));
+
     /// <summary>세션 문서를 HWPX 로 저장한다.</summary>
     /// <param name="handle">문서 핸들.</param>
     /// <param name="outputPath">저장할 경로.</param>
@@ -353,6 +443,27 @@ public static class RhwpSession
 
     [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr rhwp_document_delete_paragraph(ulong handle, uint section, uint paragraph);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_set_cell_text(
+        ulong handle, uint section, uint paragraph, uint control, uint row, uint col, byte[] text);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_delete_table_row(
+        ulong handle, uint section, uint paragraph, uint control, uint row);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_insert_table_column(
+        ulong handle, uint section, uint paragraph, uint control, uint col,
+        [MarshalAs(UnmanagedType.I1)] bool right);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_delete_table_column(
+        ulong handle, uint section, uint paragraph, uint control, uint col);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_set_table_column_widths(
+        ulong handle, uint section, uint paragraph, uint control, byte[] widths);
 
     [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr rhwp_document_save_hwpx(ulong handle, byte[] outputPath);

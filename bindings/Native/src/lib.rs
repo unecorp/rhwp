@@ -568,6 +568,211 @@ pub extern "C" fn rhwp_document_structure(handle: u64) -> *mut c_char {
     })
 }
 
+/// 표 하나를 읽기 전용으로 집는다. 없으면 `None`.
+fn table_at<'a>(
+    document: &'a HwpDocument,
+    section: usize,
+    paragraph: usize,
+    control: usize,
+) -> Option<&'a rhwp_core::model::table::Table> {
+    match document
+        .document()
+        .sections
+        .get(section)
+        .and_then(|section| section.paragraphs.get(paragraph))
+        .and_then(|para| para.controls.get(control))
+    {
+        Some(Control::Table(table)) => Some(table),
+        _ => None,
+    }
+}
+
+/// 표 칸의 글자를 통째로 바꾼다. 칸은 **행·열**로 지목한다.
+///
+/// 조립기가 표를 채우는 유일한 통로다. 자리표시자를 누름틀이 아니라 글자로 두는
+/// 서식에서는 `rhwp_document_set_field` 를 쓸 수 없고, 칸이 아예 비어 있는 서식도
+/// 흔하다 — 그때는 바꿀 누름틀조차 없다.
+///
+/// **행·열로 받고 칸 순번은 안에서 구한다.** `Table::cells` 의 순번은 행·열이 아니며
+/// `row * col_count + col` 이라는 가정은 병합 하나로 깨진다. 호출 측이 그 계산을
+/// 하게 두면 병합된 서식에서 조용히 엉뚱한 칸을 채운다.
+///
+/// **넣고 나서 지운다** — `rhwp_document_replace_text` 와 같은 이유다. 먼저 지우면
+/// 새 글자가 빈 문단의 기본 모양을 뒤집어써 서식이 템플릿에서 오지 않는다.
+/// 칸의 첫 문단만 다룬다. 서식의 표 칸이 여러 문단을 쓰는 경우는 없었고, 있다면
+/// 그것은 자료 칸이 아니다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_set_cell_text(
+    handle: u64,
+    section: u32,
+    paragraph: u32,
+    control: u32,
+    row: u32,
+    col: u32,
+    text: *const c_char,
+) -> *mut c_char {
+    ffi_result(move || {
+        let text = read_utf8(text, "text")?;
+        session::with(handle, |document| {
+            let section = section as usize;
+            let paragraph = paragraph as usize;
+            let control = control as usize;
+
+            let row = u16::try_from(row).map_err(|_| format!("행 인덱스 {} 범위 초과", row))?;
+            let col = u16::try_from(col).map_err(|_| format!("열 인덱스 {} 범위 초과", col))?;
+
+            let cell = table_at(document, section, paragraph, control)
+                .ok_or_else(|| {
+                    format!(
+                        "표를 찾지 못했습니다 - 구역 {} 문단 {} 컨트롤 {}",
+                        section, paragraph, control
+                    )
+                })?
+                .cell_index_at(row, col)
+                .ok_or_else(|| format!("표에 {}행 {}열 칸이 없습니다", row, col))?;
+
+            let old = document
+                .get_cell_paragraph_length_native(section, paragraph, control, cell, 0)
+                .map_err(|e| format!("칸 글자 길이 조회 실패 - {}", e))?;
+
+            if !text.is_empty() {
+                document
+                    .insert_text_in_cell_native(section, paragraph, control, cell, 0, old, &text)
+                    .map_err(|e| format!("칸 글자 삽입 실패 - {}", e))?;
+            }
+
+            if old > 0 {
+                document
+                    .delete_text_in_cell_native(section, paragraph, control, cell, 0, 0, old)
+                    .map_err(|e| format!("칸 글자 삭제 실패 - {}", e))?;
+            }
+
+            Ok(format!(
+                "{{\"ok\":true,\"cell\":{},\"row\":{},\"col\":{},\"removed\":{},\"inserted\":{}}}",
+                cell,
+                row,
+                col,
+                old,
+                text.chars().count()
+            ))
+        })
+    })
+}
+
+/// 표에서 행 하나를 지운다.
+///
+/// 서식의 표는 자료 행을 몇 벌 갖춰 두는데 이번 문서가 그보다 적게 쓰면 빈 행이
+/// 남는다. 늘리는 쪽(`rhwp_document_duplicate_table_row`)의 짝이다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_delete_table_row(
+    handle: u64,
+    section: u32,
+    paragraph: u32,
+    control: u32,
+    row: u32,
+) -> *mut c_char {
+    ffi_result(move || {
+        session::with(handle, |document| {
+            let row = u16::try_from(row).map_err(|_| format!("행 인덱스 {} 범위 초과", row))?;
+            document
+                .delete_table_row_native(
+                    section as usize,
+                    paragraph as usize,
+                    control as usize,
+                    row,
+                )
+                .map_err(|e| format!("표 행 삭제 실패 - {}", e))
+        })
+    })
+}
+
+/// 표에 열 하나를 끼운다. `right` 가 참이면 `col` 의 오른쪽이다.
+///
+/// 새 열은 이웃 열의 서식과 폭을 물려받으므로 **표 전체가 그만큼 넓어진다.**
+/// 폭을 되돌리려면 `rhwp_document_set_table_column_widths` 로 다시 나눈다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_insert_table_column(
+    handle: u64,
+    section: u32,
+    paragraph: u32,
+    control: u32,
+    col: u32,
+    right: bool,
+) -> *mut c_char {
+    ffi_result(move || {
+        session::with(handle, |document| {
+            let col = u16::try_from(col).map_err(|_| format!("열 인덱스 {} 범위 초과", col))?;
+            document
+                .insert_table_column_native(
+                    section as usize,
+                    paragraph as usize,
+                    control as usize,
+                    col,
+                    right,
+                )
+                .map_err(|e| format!("표 열 삽입 실패 - {}", e))
+        })
+    })
+}
+
+/// 표에서 열 하나를 지운다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_delete_table_column(
+    handle: u64,
+    section: u32,
+    paragraph: u32,
+    control: u32,
+    col: u32,
+) -> *mut c_char {
+    ffi_result(move || {
+        session::with(handle, |document| {
+            let col = u16::try_from(col).map_err(|_| format!("열 인덱스 {} 범위 초과", col))?;
+            document
+                .delete_table_column_native(
+                    section as usize,
+                    paragraph as usize,
+                    control as usize,
+                    col,
+                )
+                .map_err(|e| format!("표 열 삭제 실패 - {}", e))
+        })
+    })
+}
+
+/// 표의 열 폭을 다시 나눈다. `widths` 는 쉼표로 이은 HWPUNIT 값이다.
+///
+/// 배열 대신 문자열로 받는다. 이 C ABI 는 문자열 하나를 넣고 JSON 하나를 받는
+/// 모양으로 통일되어 있고, 열 몇 개를 위해 포인터·길이 쌍을 들이면 그 규약이
+/// 깨진다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_set_table_column_widths(
+    handle: u64,
+    section: u32,
+    paragraph: u32,
+    control: u32,
+    widths: *const c_char,
+) -> *mut c_char {
+    ffi_result(move || {
+        let widths = read_utf8(widths, "widths")?;
+        let parsed: Result<Vec<u32>, _> = widths
+            .split(',')
+            .map(|item| item.trim().parse::<u32>())
+            .collect();
+        let parsed = parsed.map_err(|e| format!("열 폭 목록을 읽지 못했습니다 - {}", e))?;
+
+        session::with(handle, |document| {
+            document
+                .set_table_column_widths_native(
+                    section as usize,
+                    paragraph as usize,
+                    control as usize,
+                    parsed.clone(),
+                )
+                .map_err(|e| format!("표 열 폭 설정 실패 - {}", e))
+        })
+    })
+}
+
 /// 세션 문서를 HWPX 로 저장한다.
 #[no_mangle]
 pub extern "C" fn rhwp_document_save_hwpx(handle: u64, output_path: *const c_char) -> *mut c_char {
