@@ -77,3 +77,182 @@ public static class RhwpNative
         }
     }
 }
+
+/// <summary>
+/// 열려 있는 문서 세션. 여러 번 편집한 뒤 한 번 저장하는 작업을 위한 표면이다.
+/// </summary>
+/// <remarks>
+/// <c>rhwp_export_text</c> 계열은 호출마다 파일을 다시 파싱하고 결과를 파일로
+/// 떨군다. 마크다운을 HWPX 로 조립하는 작업에는 맞지 않는다 — 편집이 호출 사이에
+/// 남아야 하기 때문이다.
+/// <para>
+/// 핸들은 포인터가 아니라 정수다. 잘못된 값을 넘겨도 정의되지 않은 동작이 되지
+/// 않고 오류로 응답한다. <c>0</c> 은 언제나 유효하지 않은 핸들이다.
+/// </para>
+/// </remarks>
+public static class RhwpSession
+{
+    private const string NativeLibraryName = "rhwp_native_ffi";
+
+    /// <summary>유효하지 않은 핸들.</summary>
+    public const ulong InvalidHandle = 0;
+
+    /// <summary>
+    /// HWPX 파일을 열고 핸들을 돌려준다.
+    /// </summary>
+    /// <param name="inputPath">HWPX 파일 경로.</param>
+    /// <returns>문서 핸들. 실패하면 <see cref="InvalidHandle"/> — 사유는 <see cref="LastError"/>.</returns>
+    public static ulong Open(string inputPath) =>
+        rhwp_document_open(ToUtf8(inputPath));
+
+    /// <summary>
+    /// 바이트에서 직접 연다. 업로드 스트림을 임시 파일로 떨구지 않기 위함이다.
+    /// </summary>
+    /// <param name="data">HWPX 바이트.</param>
+    /// <returns>문서 핸들. 실패하면 <see cref="InvalidHandle"/>.</returns>
+    public static ulong OpenBytes(ReadOnlySpan<byte> data)
+    {
+        unsafe
+        {
+            fixed (byte* pointer = data)
+            {
+                return rhwp_document_open_bytes(pointer, (nuint)data.Length);
+            }
+        }
+    }
+
+    /// <summary>핸들을 해제한다. 유효하지 않은 핸들·이중 해제는 무시된다.</summary>
+    /// <param name="handle">문서 핸들.</param>
+    public static void Close(ulong handle) => rhwp_document_close(handle);
+
+    /// <summary>열려 있는 문서 수. 누수 점검용이다.</summary>
+    /// <returns>세션에 남아 있는 문서 수.</returns>
+    public static ulong OpenCount() => rhwp_document_open_count();
+
+    /// <summary>
+    /// 마지막 오류를 읽는다. 읽으면 비워진다.
+    /// </summary>
+    /// <returns><c>{"error":"…"}</c> 형태의 JSON.</returns>
+    public static string LastError() => TakeResultString(rhwp_last_error());
+
+    /// <summary>구역 수와 구역별 문단 수. 붙여넣을 위치를 정하는 데 쓴다.</summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <returns>결과 JSON.</returns>
+    public static string Info(ulong handle) => TakeResultString(rhwp_document_info(handle));
+
+    /// <summary>누름틀 목록을 JSON 배열로 읽는다.</summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <returns>결과 JSON.</returns>
+    public static string Fields(ulong handle) => TakeResultString(rhwp_document_fields(handle));
+
+    /// <summary>
+    /// HTML 조각을 지정한 위치에 붙여넣는다.
+    /// </summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <param name="section">구역 인덱스.</param>
+    /// <param name="paragraph">문단 인덱스.</param>
+    /// <param name="charOffset">문단 안 문자 위치.</param>
+    /// <param name="html">붙여넣을 HTML.</param>
+    /// <returns>결과 JSON.</returns>
+    public static string PasteHtml(ulong handle, uint section, uint paragraph, uint charOffset, string html) =>
+        TakeResultString(rhwp_document_paste_html(handle, section, paragraph, charOffset, ToUtf8(html)));
+
+    /// <summary>
+    /// HTML 조각을 문서 맨 끝에 붙여넣는다.
+    /// </summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <param name="html">붙여넣을 HTML.</param>
+    /// <returns>결과 JSON.</returns>
+    public static string AppendHtml(ulong handle, string html) =>
+        TakeResultString(rhwp_document_append_html(handle, ToUtf8(html)));
+
+    /// <summary>
+    /// 이름으로 누름틀 값을 채운다.
+    /// </summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <param name="name">누름틀 이름.</param>
+    /// <param name="occurrence">같은 이름이 여러 개일 때 몇 번째인지(0 부터).</param>
+    /// <param name="value">채울 값.</param>
+    /// <returns>결과 JSON.</returns>
+    /// <remarks>
+    /// CLI <c>edit fill-fields</c> 는 첫 칸만 채우지만 여기서는 몇 번째인지 고를 수
+    /// 있다. 표 머리글처럼 같은 이름이 여러 칸에 걸린 서식에서 이 차이가 결정적이다.
+    /// </remarks>
+    public static string SetField(ulong handle, string name, uint occurrence, string value) =>
+        TakeResultString(rhwp_document_set_field(handle, ToUtf8(name), occurrence, ToUtf8(value)));
+
+    /// <summary>세션 문서를 HWPX 로 저장한다.</summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <param name="outputPath">저장할 경로.</param>
+    /// <returns>결과 JSON.</returns>
+    public static string SaveHwpx(ulong handle, string outputPath) =>
+        TakeResultString(rhwp_document_save_hwpx(handle, ToUtf8(outputPath)));
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern ulong rhwp_document_open(byte[] inputPath);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern unsafe ulong rhwp_document_open_bytes(byte* data, nuint length);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void rhwp_document_close(ulong handle);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern ulong rhwp_document_open_count();
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_last_error();
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_info(ulong handle);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_fields(ulong handle);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_paste_html(
+        ulong handle, uint section, uint paragraph, uint charOffset, byte[] html);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_append_html(ulong handle, byte[] html);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_set_field(
+        ulong handle, byte[] name, uint occurrence, byte[] value);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_save_hwpx(ulong handle, byte[] outputPath);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void rhwp_string_free(IntPtr value);
+
+    private static byte[] ToUtf8(string value)
+    {
+        if (value is null)
+        {
+            throw new ArgumentNullException(nameof(value));
+        }
+
+        byte[] utf8 = Encoding.UTF8.GetBytes(value);
+        Array.Resize(ref utf8, utf8.Length + 1);
+        return utf8;
+    }
+
+    private static string TakeResultString(IntPtr result)
+    {
+        if (result == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("Native rhwp call returned a null result pointer.");
+        }
+
+        try
+        {
+            return Marshal.PtrToStringUTF8(result)
+                ?? throw new InvalidOperationException("Native rhwp call returned invalid UTF-8.");
+        }
+        finally
+        {
+            rhwp_string_free(result);
+        }
+    }
+}

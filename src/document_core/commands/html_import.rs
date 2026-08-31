@@ -159,7 +159,11 @@ impl DocumentCore {
 
             // 선택적 재구성: 원본 문단 재구성 + 삽입 문단 composed 추가
             self.recompose_paragraph(section_idx, para_idx);
-            for i in (para_idx + 1..=last_para_idx).rev() {
+            // 오름차순으로 넣어야 한다. `insert_composed_paragraph` 는 결국
+            // `Vec::insert(i, _)` 라 `i <= len` 이어야 하는데, 내림차순으로 돌면
+            // 첫 호출이 가장 큰 인덱스라 범위를 넘어 패닉한다. 아래 비-컨트롤
+            // 분기는 처음부터 오름차순이며, 이 분기만 `.rev()` 가 붙어 있었다.
+            for i in para_idx + 1..=last_para_idx {
                 self.insert_composed_paragraph(section_idx, i);
             }
             self.paginate_if_needed();

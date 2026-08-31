@@ -4,14 +4,32 @@
 //! returns a UTF-8 JSON result string. Call `rhwp_string_free` for every string
 //! returned from this module.
 
+use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 
+use rhwp_core::parser::{detect_format, FileFormat};
 use rhwp_core::wasm_api::HwpDocument;
 
+mod session;
+
 const ALL_PAGES: i32 = -1;
+
+thread_local! {
+    /// 정수를 돌려주는 진입점의 실패 사유. 문자열을 돌려주는 진입점은 JSON 봉투에
+    /// 오류를 직접 싣기 때문에 이 값을 쓰지 않는다.
+    static LAST_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+fn set_last_error(message: impl Into<String>) {
+    LAST_ERROR.with(|slot| *slot.borrow_mut() = message.into());
+}
+
+fn take_last_error() -> String {
+    LAST_ERROR.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+}
 
 #[no_mangle]
 pub extern "C" fn rhwp_export_text(
@@ -73,6 +91,262 @@ pub unsafe extern "C" fn rhwp_string_free(ptr: *mut c_char) {
     unsafe {
         drop(CString::from_raw(ptr));
     }
+}
+
+// ── 문서 세션 표면 ─────────────────────────────────────────────────────────
+//
+// 위쪽 진입점들은 호출마다 파일을 다시 파싱하고 결과를 파일로 떨군다. 마크다운을
+// HWPX 로 조립하는 작업에는 맞지 않는다 — 편집이 호출 사이에 남아야 하기 때문이다.
+// 아래 표면은 문서를 세션으로 들고 있으면서 편집하고 마지막에 한 번 저장한다.
+//
+// 핸들은 포인터가 아니라 정수다(`session` 모듈 참조). 0 은 언제나 실패를 뜻하고,
+// 그때의 사유는 `rhwp_last_error()` 로 조회한다.
+
+/// 정수를 돌려주는 진입점용 패닉 가드.
+///
+/// `ffi_result` 는 문자열 전용이라 여기서는 쓸 수 없다. 가드가 없으면 패닉이 FFI
+/// 경계를 넘어 호출 측 프로세스를 즉시 죽인다.
+fn guard_u64<F>(f: F) -> u64
+where
+    F: FnOnce() -> Result<u64, String> + std::panic::UnwindSafe,
+{
+    match std::panic::catch_unwind(f) {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => {
+            set_last_error(error);
+            0
+        }
+        Err(_) => {
+            set_last_error("FFI 호출 중 panic이 발생했습니다.");
+            0
+        }
+    }
+}
+
+/// 마지막 오류를 JSON 으로 돌려준다. 읽으면 비워진다.
+///
+/// `rhwp_string_free` 로 해제한다.
+#[no_mangle]
+pub extern "C" fn rhwp_last_error() -> *mut c_char {
+    ffi_result(|| {
+        let error = take_last_error();
+        Ok(format!(
+            "{{\"error\":\"{}\"}}",
+            json_escape(&error)
+        ))
+    })
+}
+
+/// HWPX 여부를 확인한다.
+///
+/// C# 쪽이 이미 같은 검사를 하지만(`RhwpFormat`), 네이티브 표면을 직접 부르는
+/// 경로가 있으므로 여기서도 막는다. 다만 여기서는 ZIP 매직까지만 본다 — `mimetype`
+/// 엔트리 값 대조는 C# 쪽 검사가 맡는다.
+fn ensure_hwpx(data: &[u8]) -> Result<(), String> {
+    match detect_format(data) {
+        FileFormat::Hwpx => Ok(()),
+        FileFormat::Hwp | FileFormat::Hwp3 => {
+            Err("HWPX 형식만 지원합니다. 입력이 HWP 바이너리입니다.".to_string())
+        }
+        FileFormat::Hml => Err("HWPX 형식만 지원합니다. 입력이 HWPML(.hml)입니다.".to_string()),
+        FileFormat::DrmProtected => {
+            Err("DRM 으로 보호된 문서입니다. 보호를 해제한 뒤 저장해 주세요.".to_string())
+        }
+        FileFormat::Empty => Err("빈 파일(0 바이트)입니다.".to_string()),
+        FileFormat::Unknown => Err("HWPX 형식만 지원합니다.".to_string()),
+    }
+}
+
+/// HWPX 파일을 열고 핸들을 돌려준다. 실패 시 0 — 사유는 `rhwp_last_error()`.
+#[no_mangle]
+pub extern "C" fn rhwp_document_open(input_path: *const c_char) -> u64 {
+    guard_u64(|| {
+        let input_path = read_utf8(input_path, "input_path")?;
+        let data = fs::read(&input_path)
+            .map_err(|e| format!("파일을 읽을 수 없습니다 - {}: {}", input_path, e))?;
+        open_from_bytes(&data)
+    })
+}
+
+/// 바이트에서 직접 연다. 업로드 스트림을 임시 파일로 떨구지 않기 위함이다.
+///
+/// # Safety
+///
+/// `data` 는 `len` 바이트를 읽을 수 있는 유효한 포인터여야 한다.
+#[no_mangle]
+pub unsafe extern "C" fn rhwp_document_open_bytes(data: *const u8, len: usize) -> u64 {
+    guard_u64(|| {
+        if data.is_null() {
+            return Err("data가 null입니다.".to_string());
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+        open_from_bytes(bytes)
+    })
+}
+
+fn open_from_bytes(data: &[u8]) -> Result<u64, String> {
+    ensure_hwpx(data)?;
+    let document = HwpDocument::from_bytes(data).map_err(|e| format!("HWPX 파싱 실패 - {}", e))?;
+    session::insert(document)
+}
+
+/// 핸들을 해제한다. 널/이중 해제는 무시한다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_close(handle: u64) {
+    let _ = std::panic::catch_unwind(|| session::remove(handle));
+}
+
+/// 열려 있는 문서 수. 누수 점검용이다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_open_count() -> u64 {
+    std::panic::catch_unwind(|| session::count() as u64).unwrap_or(0)
+}
+
+/// 세션 문서의 구조 정보. 붙여넣을 위치를 정하는 데 쓴다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_info(handle: u64) -> *mut c_char {
+    ffi_result(move || {
+        session::with(handle, |document| {
+            let section_count = document.get_section_count() as usize;
+            let paragraph_counts: Vec<String> = (0..section_count)
+                .map(|section| {
+                    document
+                        .get_paragraph_count_native(section)
+                        .map(|count| count.to_string())
+                        .unwrap_or_else(|_| "0".to_string())
+                })
+                .collect();
+
+            Ok(format!(
+                "{{\"ok\":true,\"pageCount\":{},\"sectionCount\":{},\"paragraphCounts\":[{}]}}",
+                document.page_count(),
+                section_count,
+                paragraph_counts.join(",")
+            ))
+        })
+    })
+}
+
+/// HTML 조각을 지정한 위치에 붙여넣는다.
+///
+/// 마크다운을 HWPX 로 만드는 경로의 핵심이다. 호출 측이 마크다운을 HTML 로 바꿔
+/// 넘기면 rhwp 가 문단·표·이미지로 변환해 문서에 심는다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_paste_html(
+    handle: u64,
+    section: u32,
+    paragraph: u32,
+    char_offset: u32,
+    html: *const c_char,
+) -> *mut c_char {
+    ffi_result(move || {
+        let html = read_utf8(html, "html")?;
+        session::with(handle, |document| {
+            document
+                .paste_html_native(
+                    section as usize,
+                    paragraph as usize,
+                    char_offset as usize,
+                    &html,
+                )
+                .map_err(|e| format!("HTML 붙여넣기 실패 - {}", e))
+        })
+    })
+}
+
+/// HTML 조각을 문서 맨 끝에 붙여넣는다.
+///
+/// 위치를 직접 계산하지 않아도 되는 흔한 경우를 위한 편의 함수다. 마지막 구역의
+/// 마지막 문단 끝에 붙으므로, **그 문단에 내용이 있으면 첫 문단이 이어 붙는다.**
+/// 빈 문단으로 끝나는 템플릿에서 자연스럽게 동작한다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_append_html(handle: u64, html: *const c_char) -> *mut c_char {
+    ffi_result(move || {
+        let html = read_utf8(html, "html")?;
+        session::with(handle, |document| {
+            let section_count = document.get_section_count() as usize;
+            if section_count == 0 {
+                return Err("문서에 구역이 없습니다.".to_string());
+            }
+            let section = section_count - 1;
+
+            let paragraph_count = document
+                .get_paragraph_count_native(section)
+                .map_err(|e| format!("문단 수 조회 실패 - {}", e))?;
+            if paragraph_count == 0 {
+                return Err("마지막 구역에 문단이 없습니다.".to_string());
+            }
+            let paragraph = paragraph_count - 1;
+
+            let char_offset = document
+                .get_paragraph_length_native(section, paragraph)
+                .map_err(|e| format!("문단 길이 조회 실패 - {}", e))?;
+
+            document
+                .paste_html_native(section, paragraph, char_offset, &html)
+                .map_err(|e| format!("HTML 붙여넣기 실패 - {}", e))
+        })
+    })
+}
+
+/// 이름으로 누름틀 값을 채운다. 같은 이름이 여러 개면 `occurrence` 로 고른다.
+///
+/// CLI `edit fill-fields` 는 첫 칸만 채우지만 여기서는 몇 번째인지 지정할 수 있다.
+/// 표 머리글처럼 같은 이름이 여러 칸에 걸린 서식에서 이 차이가 결정적이다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_set_field(
+    handle: u64,
+    name: *const c_char,
+    occurrence: u32,
+    value: *const c_char,
+) -> *mut c_char {
+    ffi_result(move || {
+        let name = read_utf8(name, "name")?;
+        let value = read_utf8(value, "value")?;
+        session::with(handle, |document| {
+            document
+                .set_field_value_by_name_at(&name, occurrence as usize, &value)
+                .map_err(|e| format!("누름틀 '{}' 설정 실패 - {}", name, e))
+        })
+    })
+}
+
+/// 누름틀 목록을 JSON 배열로 돌려준다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_fields(handle: u64) -> *mut c_char {
+    ffi_result(move || session::with(handle, |document| Ok(document.get_field_list())))
+}
+
+/// 세션 문서를 HWPX 로 저장한다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_save_hwpx(handle: u64, output_path: *const c_char) -> *mut c_char {
+    ffi_result(move || {
+        let output_path = read_utf8(output_path, "output_path")?;
+        session::with(handle, |document| {
+            let bytes = document
+                .export_hwpx_native()
+                .map_err(|e| format!("HWPX 직렬화 실패 - {}", e))?;
+
+            let path = Path::new(&output_path);
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    fs::create_dir_all(parent).map_err(|e| {
+                        format!("출력 폴더를 생성할 수 없습니다 - {}: {}", parent.display(), e)
+                    })?;
+                }
+            }
+
+            let byte_count = bytes.len();
+            fs::write(path, &bytes)
+                .map_err(|e| format!("HWPX 저장 실패 - {}: {}", output_path, e))?;
+
+            Ok(format!(
+                "{{\"ok\":true,\"output\":\"{}\",\"bytes\":{}}}",
+                json_escape(&output_path),
+                byte_count
+            ))
+        })
+    })
 }
 
 fn export_text_to_dir(
