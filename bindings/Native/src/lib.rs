@@ -311,10 +311,94 @@ pub extern "C" fn rhwp_document_set_field(
     })
 }
 
-/// 누름틀 목록을 JSON 배열로 돌려준다.
+/// 문단을 서식·누름틀째 복제해 지정 위치에 넣는다.
+///
+/// 서식 문서로 보고서를 조립하는 경로의 핵심이다. 템플릿은 각 수준을 한 벌씩만
+/// 들고 있으므로, 마크다운의 항목이 다섯 개면 그 수준의 문단을 다섯 벌로 늘린 뒤
+/// `rhwp_document_set_field` 로 하나씩 채운다. 복제본은 앞머리 글머리표와 글자
+/// 모양까지 원본 그대로라 서식의 단일 출처가 템플릿에 남는다.
 #[no_mangle]
-pub extern "C" fn rhwp_document_fields(handle: u64) -> *mut c_char {
-    ffi_result(move || session::with(handle, |document| Ok(document.get_field_list())))
+pub extern "C" fn rhwp_document_duplicate_paragraph(
+    handle: u64,
+    section: u32,
+    source_paragraph: u32,
+    dest_paragraph: u32,
+    count: u32,
+) -> *mut c_char {
+    ffi_result(move || {
+        session::with(handle, |document| {
+            document
+                .duplicate_paragraph_native(
+                    section as usize,
+                    source_paragraph as usize,
+                    dest_paragraph as usize,
+                    count as usize,
+                )
+                .map_err(|e| format!("문단 복제 실패 - {}", e))
+        })
+    })
+}
+
+/// 문단을 지운다.
+///
+/// 조립이 끝난 뒤 템플릿의 견본 문단을 걷어내는 데 쓴다. 견본을 남겨 두면 안내문이
+/// 그대로 인쇄되므로, 늘린 뒤 원본을 지우는 것이 한 벌이다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_delete_paragraph(
+    handle: u64,
+    section: u32,
+    paragraph: u32,
+) -> *mut c_char {
+    ffi_result(move || {
+        session::with(handle, |document| {
+            document
+                .delete_paragraph_native(section as usize, paragraph as usize)
+                .map_err(|e| format!("문단 삭제 실패 - {}", e))
+        })
+    })
+}
+
+/// 누름틀의 이름과 **문단 위치**를 돌려준다. 조립할 자리를 찾는 데 쓴다.
+///
+/// CLI `fields --json` 과 겹쳐 보이지만 목적이 다르고, 그래서 내용도 다르다.
+/// 저쪽은 사람이 문서를 들여다보는 용도라 안내문·현재값까지 싣는다. 이쪽은
+/// "이 수준의 문단이 몇 번인가"만 답한다 — 그 답이 `rhwp_document_duplicate_paragraph`
+/// 의 인자가 된다.
+///
+/// `occurrence` 는 같은 이름 안에서의 순번이며 `rhwp_document_set_field` 의 것과 같다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_field_anchors(handle: u64) -> *mut c_char {
+    ffi_result(move || {
+        session::with(handle, |document| {
+            let mut seen: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+
+            let entries: Vec<String> = document
+                .collect_all_fields()
+                .iter()
+                .map(|info| {
+                    let name = info.field.field_name().unwrap_or("").to_string();
+                    let occurrence = seen.entry(name.clone()).or_insert(0);
+                    let index = *occurrence;
+                    *occurrence += 1;
+
+                    format!(
+                        "{{\"name\":\"{}\",\"occurrence\":{},\"section\":{},\"paragraph\":{},\"nested\":{}}}",
+                        json_escape(&name),
+                        index,
+                        info.location.section_index,
+                        info.location.para_index,
+                        info.location.nested_path.len()
+                    )
+                })
+                .collect();
+
+            Ok(format!(
+                "{{\"ok\":true,\"anchors\":[{}]}}",
+                entries.join(",")
+            ))
+        })
+    })
 }
 
 /// 세션 문서를 HWPX 로 저장한다.

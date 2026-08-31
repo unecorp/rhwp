@@ -140,10 +140,18 @@ public static class RhwpSession
     /// <returns>결과 JSON.</returns>
     public static string Info(ulong handle) => TakeResultString(rhwp_document_info(handle));
 
-    /// <summary>누름틀 목록을 JSON 배열로 읽는다.</summary>
+    /// <summary>
+    /// 누름틀의 이름과 문단 위치를 읽는다. 조립할 자리를 찾는 데 쓴다.
+    /// </summary>
     /// <param name="handle">문서 핸들.</param>
-    /// <returns>결과 JSON.</returns>
-    public static string Fields(ulong handle) => TakeResultString(rhwp_document_fields(handle));
+    /// <returns><c>{"ok":true,"anchors":[{name,occurrence,section,paragraph,nested}]}</c>.</returns>
+    /// <remarks>
+    /// CLI <c>fields --json</c> 과 겹쳐 보이지만 목적이 다르고, 그래서 내용도 다르다.
+    /// 저쪽은 사람이 문서를 들여다보는 용도라 안내문·현재값까지 싣는다. 이쪽은
+    /// "이 수준의 문단이 몇 번인가"만 답한다 — 그 답이 <see cref="DuplicateParagraph"/>
+    /// 의 인자가 된다.
+    /// </remarks>
+    public static string FieldAnchors(ulong handle) => TakeResultString(rhwp_document_field_anchors(handle));
 
     /// <summary>
     /// HTML 조각을 지정한 위치에 붙여넣는다.
@@ -181,6 +189,41 @@ public static class RhwpSession
     public static string SetField(ulong handle, string name, uint occurrence, string value) =>
         TakeResultString(rhwp_document_set_field(handle, ToUtf8(name), occurrence, ToUtf8(value)));
 
+    /// <summary>
+    /// 문단을 서식·누름틀째 복제해 지정 위치에 넣는다.
+    /// </summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <param name="section">구역 인덱스.</param>
+    /// <param name="sourceParagraph">복제할 원본 문단.</param>
+    /// <param name="destParagraph">복제본을 넣을 위치. 구역 문단 수와 같으면 맨 끝.</param>
+    /// <param name="count">복제 벌 수.</param>
+    /// <returns>결과 JSON.</returns>
+    /// <remarks>
+    /// 서식 문서로 보고서를 조립하는 경로의 핵심이다. 템플릿은 각 수준을 한 벌씩만
+    /// 들고 있으므로, 마크다운의 항목이 다섯 개면 그 수준의 문단을 다섯 벌로 늘린 뒤
+    /// <see cref="SetField"/> 로 하나씩 채운다. 복제본은 앞머리 글머리표와 글자
+    /// 모양까지 원본 그대로라 서식의 단일 출처가 템플릿에 남는다.
+    /// </remarks>
+    public static string DuplicateParagraph(
+        ulong handle, uint section, uint sourceParagraph, uint destParagraph, uint count) =>
+        TakeResultString(rhwp_document_duplicate_paragraph(
+            handle, section, sourceParagraph, destParagraph, count));
+
+    /// <summary>
+    /// 문단을 지운다.
+    /// </summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <param name="section">구역 인덱스.</param>
+    /// <param name="paragraph">지울 문단.</param>
+    /// <returns>결과 JSON.</returns>
+    /// <remarks>
+    /// 조립이 끝난 뒤 템플릿의 견본 문단을 걷어내는 데 쓴다. 견본을 남겨 두면 안내문이
+    /// 그대로 인쇄되므로, 늘린 뒤 원본을 지우는 것이 한 벌이다. 여러 개를 지울 때는
+    /// <b>인덱스가 큰 것부터</b> 지워야 앞쪽 인덱스가 밀리지 않는다.
+    /// </remarks>
+    public static string DeleteParagraph(ulong handle, uint section, uint paragraph) =>
+        TakeResultString(rhwp_document_delete_paragraph(handle, section, paragraph));
+
     /// <summary>세션 문서를 HWPX 로 저장한다.</summary>
     /// <param name="handle">문서 핸들.</param>
     /// <param name="outputPath">저장할 경로.</param>
@@ -207,7 +250,7 @@ public static class RhwpSession
     private static extern IntPtr rhwp_document_info(ulong handle);
 
     [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
-    private static extern IntPtr rhwp_document_fields(ulong handle);
+    private static extern IntPtr rhwp_document_field_anchors(ulong handle);
 
     [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr rhwp_document_paste_html(
@@ -219,6 +262,13 @@ public static class RhwpSession
     [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr rhwp_document_set_field(
         ulong handle, byte[] name, uint occurrence, byte[] value);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_duplicate_paragraph(
+        ulong handle, uint section, uint sourceParagraph, uint destParagraph, uint count);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_delete_paragraph(ulong handle, uint section, uint paragraph);
 
     [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr rhwp_document_save_hwpx(ulong handle, byte[] outputPath);
