@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -144,7 +144,11 @@ public static class RhwpSession
     /// 누름틀의 이름과 문단 위치를 읽는다. 조립할 자리를 찾는 데 쓴다.
     /// </summary>
     /// <param name="handle">문서 핸들.</param>
-    /// <returns><c>{"ok":true,"anchors":[{name,occurrence,section,paragraph,nested}]}</c>.</returns>
+    /// <returns>
+    /// <c>{"ok":true,"anchors":[{name,occurrence,section,paragraph,nested,text}]}</c>.
+    /// 표 셀에 든 누름틀은 <c>control</c>·<c>cell</c>·<c>row</c>·<c>col</c>·<c>rowCount</c>·
+    /// <c>colCount</c> 를 더 싣는다 — <see cref="DuplicateTableRow"/> 의 인자가 그것이다.
+    /// </returns>
     /// <remarks>
     /// CLI <c>fields --json</c> 과 겹쳐 보이지만 목적이 다르고, 그래서 내용도 다르다.
     /// 저쪽은 사람이 문서를 들여다보는 용도라 안내문·현재값까지 싣는다. 이쪽은
@@ -248,6 +252,32 @@ public static class RhwpSession
     public static string DeleteParagraph(ulong handle, uint section, uint paragraph) =>
         TakeResultString(rhwp_document_delete_paragraph(handle, section, paragraph));
 
+    /// <summary>
+    /// 표의 한 행을 내용·서식·누름틀째 복제해 바로 아래에 넣는다.
+    /// </summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <param name="section">구역 인덱스.</param>
+    /// <param name="paragraph">표를 담은 본문 문단.</param>
+    /// <param name="control">그 문단 안에서 표가 몇 번째 컨트롤인지.</param>
+    /// <param name="row">복제할 원본 행.</param>
+    /// <param name="count">복제 벌 수.</param>
+    /// <returns>결과 JSON.</returns>
+    /// <remarks>
+    /// <see cref="DuplicateParagraph"/> 의 표 판이다. 자료 행의 칸마다 누름틀이 하나씩
+    /// 박혀 있고 그 이름이 곧 "이 칸에 무엇을 넣는가"이므로, 복제본도 같은 이름을
+    /// 들고 있어야 <see cref="SetField"/> 의 순번으로 행을 고를 수 있다. 상류의 행
+    /// 삽입은 서식만 물려주고 글자를 비우므로 조립에는 쓸 수 없다.
+    /// <para>
+    /// 원본 행에 병합된 칸이 있으면 실패한다. 상류의 행 삽입이 병합을 풀어 열마다
+    /// 한 칸씩 만드는 탓에 원본과 칸 수가 달라지고, 그대로 두면 표가 <b>조용히</b>
+    /// 어긋난 채 저장되기 때문이다.
+    /// </para>
+    /// </remarks>
+    public static string DuplicateTableRow(
+        ulong handle, uint section, uint paragraph, uint control, uint row, uint count) =>
+        TakeResultString(rhwp_document_duplicate_table_row(
+            handle, section, paragraph, control, row, count));
+
     /// <summary>세션 문서를 HWPX 로 저장한다.</summary>
     /// <param name="handle">문서 핸들.</param>
     /// <param name="outputPath">저장할 경로.</param>
@@ -290,6 +320,10 @@ public static class RhwpSession
     [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr rhwp_document_duplicate_paragraph(
         ulong handle, uint section, uint sourceParagraph, uint destParagraph, uint count);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_duplicate_table_row(
+        ulong handle, uint section, uint paragraph, uint control, uint row, uint count);
 
     [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr rhwp_document_replace_text(

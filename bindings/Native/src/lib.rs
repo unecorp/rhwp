@@ -10,6 +10,8 @@ use std::fs;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 
+use rhwp_core::document_core::queries::field_query::{FieldInfo, NestedEntry};
+use rhwp_core::model::control::Control;
 use rhwp_core::parser::{detect_format, FileFormat};
 use rhwp_core::wasm_api::HwpDocument;
 
@@ -445,13 +447,14 @@ pub extern "C" fn rhwp_document_field_anchors(handle: u64) -> *mut c_char {
                         .unwrap_or("");
 
                     format!(
-                        "{{\"name\":\"{}\",\"occurrence\":{},\"section\":{},\"paragraph\":{},\"nested\":{},\"text\":\"{}\"}}",
+                        "{{\"name\":\"{}\",\"occurrence\":{},\"section\":{},\"paragraph\":{},\"nested\":{},\"text\":\"{}\"{}}}",
                         json_escape(&name),
                         index,
                         info.location.section_index,
                         info.location.para_index,
                         info.location.nested_path.len(),
-                        json_escape(paragraph_text)
+                        json_escape(paragraph_text),
+                        table_cell_json(document, info)
                     )
                 })
                 .collect();
@@ -460,6 +463,80 @@ pub extern "C" fn rhwp_document_field_anchors(handle: u64) -> *mut c_char {
                 "{{\"ok\":true,\"anchors\":[{}]}}",
                 entries.join(",")
             ))
+        })
+    })
+}
+
+/// 표 셀에 든 누름틀이면 그 칸의 표 좌표를, 아니면 빈 문자열을 돌려준다.
+///
+/// 표 조립은 "몇 번째 행"으로 말한다(`rhwp_document_duplicate_table_row`). 그런데
+/// `FieldInfo` 가 주는 것은 `cell_index` — `Table::cells` 안에서의 순번이라 행·열이
+/// 아니다. 병합이 없는 표에서는 `row * col_count + col` 과 같지만 그 가정은 병합
+/// 하나로 깨진다. **추측하지 않고 표에서 직접 읽는다.**
+///
+/// 깊이 1 의 표 셀만 다룬다. 중첩 표나 글상자 안의 누름틀은 조립 대상이 아니므로
+/// 좌표를 싣지 않고, 받는 쪽은 `row` 가 없는 것으로 그것을 안다.
+fn table_cell_json(document: &HwpDocument, info: &FieldInfo) -> String {
+    let [NestedEntry::TableCell {
+        control_index,
+        cell_index,
+        ..
+    }] = info.location.nested_path.as_slice()
+    else {
+        return String::new();
+    };
+
+    let Some(Control::Table(table)) = document
+        .document()
+        .sections
+        .get(info.location.section_index)
+        .and_then(|section| section.paragraphs.get(info.location.para_index))
+        .and_then(|para| para.controls.get(*control_index))
+    else {
+        return String::new();
+    };
+
+    let Some(cell) = table.cells.get(*cell_index) else {
+        return String::new();
+    };
+
+    format!(
+        ",\"control\":{},\"cell\":{},\"row\":{},\"col\":{},\"rowCount\":{},\"colCount\":{}",
+        control_index, cell_index, cell.row, cell.col, table.row_count, table.col_count
+    )
+}
+
+/// 표의 한 행을 내용·서식·누름틀째 복제해 바로 아래에 넣는다.
+///
+/// 문단 복제(`rhwp_document_duplicate_paragraph`)의 표 판이다. 자료 행의 칸마다
+/// 누름틀이 하나씩 박혀 있고 그 이름이 곧 "이 칸에 무엇을 넣는가"이므로, 복제본도
+/// 같은 이름을 들고 있어야 `rhwp_document_set_field` 의 `occurrence` 로 행을 고를 수
+/// 있다. 상류 `insert_table_row_native` 는 서식만 물려주고 글자를 비우므로 —
+/// 편집기용으로는 그것이 맞다 — 조립 경로에서는 쓸 수 없다.
+///
+/// 원본 행에 병합된 칸이 있으면 실패한다. 자세한 사유는
+/// `DocumentCore::duplicate_table_row_native` 의 주석에 있다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_duplicate_table_row(
+    handle: u64,
+    section: u32,
+    paragraph: u32,
+    control: u32,
+    row: u32,
+    count: u32,
+) -> *mut c_char {
+    ffi_result(move || {
+        session::with(handle, |document| {
+            let row = u16::try_from(row).map_err(|_| format!("행 인덱스 {} 범위 초과", row))?;
+            document
+                .duplicate_table_row_native(
+                    section as usize,
+                    paragraph as usize,
+                    control as usize,
+                    row,
+                    count as usize,
+                )
+                .map_err(|e| format!("표 행 복제 실패 - {}", e))
         })
     })
 }
