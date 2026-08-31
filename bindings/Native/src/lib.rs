@@ -541,6 +541,33 @@ pub extern "C" fn rhwp_document_duplicate_table_row(
     })
 }
 
+/// 문서의 서식 구조를 한 봉투의 JSON 으로 돌려준다. 서식 템플릿 분석의 입력이다.
+///
+/// 담기는 것은 **읽은 값뿐이고 판단은 없다.** 어느 문단이 몇 수준인지, 어느 표가
+/// 견본인지는 호출 측이 정한다 — 그 규칙은 서식마다 다르고 자주 바뀌므로 네이티브
+/// 산출물에 굳혀 두면 규칙 하나 고치는 데 양 플랫폼 재빌드가 든다.
+///
+/// 조회 함수를 열여덟 개 따로 내보내지 않고 하나로 모은 이유는 봉투 모양 때문이다.
+/// 상류의 조회들은 같은 개념에 서로 다른 키 이름을 쓴다(5.5.3·8.3 에서 두 번 겪었다).
+/// 호출 측이 열여덟 벌의 모델을 들고 키를 맞추다 한 번 어긋나면 **예외 없이 빈 값**을
+/// 얻는다. 한 번 훑어 한 봉투면 모델도 하나다.
+///
+/// 담기는 것:
+/// - `info` — 판·구역 수·쪽 수·쓰인 글꼴
+/// - `styles` · `numbering` — 스타일 목록과 개요 번호 형식
+/// - `sections[].paragraphs[]` — 글자, 스타일, 글자 모양, 문단 모양
+/// - `sections[].tables[]` — 표 크기, 표 속성, 칸마다의 자리·속성·글자 모양
+#[no_mangle]
+pub extern "C" fn rhwp_document_structure(handle: u64) -> *mut c_char {
+    ffi_result(move || {
+        session::with(handle, |document| {
+            document
+                .structure_dump_native()
+                .map_err(|e| format!("문서 구조 덤프 실패 - {}", e))
+        })
+    })
+}
+
 /// 세션 문서를 HWPX 로 저장한다.
 #[no_mangle]
 pub extern "C" fn rhwp_document_save_hwpx(handle: u64, output_path: *const c_char) -> *mut c_char {

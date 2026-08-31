@@ -278,6 +278,25 @@ public static class RhwpSession
         TakeResultString(rhwp_document_duplicate_table_row(
             handle, section, paragraph, control, row, count));
 
+    /// <summary>
+    /// 문서의 서식 구조를 한 봉투의 JSON 으로 읽는다. 서식 템플릿 분석의 입력이다.
+    /// </summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <returns>
+    /// <c>{"ok":true,"info":{…},"styles":[…],"numbering":[…],"sections":[{"paragraphs":[…],"tables":[…]}]}</c>.
+    /// </returns>
+    /// <remarks>
+    /// 담기는 것은 <b>읽은 값뿐이고 판단은 없다.</b> 어느 문단이 몇 수준인지, 어느 표가
+    /// 견본인지는 부르는 쪽이 정한다 — 그 규칙은 서식마다 다르고 자주 바뀌므로 네이티브
+    /// 산출물에 굳혀 두면 규칙 하나 고치는 데 양 플랫폼 재빌드가 든다.
+    /// <para>
+    /// 조회를 열여덟 개 따로 내보내지 않고 하나로 모았다. 상류의 조회들은 같은 개념에
+    /// 서로 다른 키 이름을 쓰고, 그 함정에 두 번 빠졌다. 한 번 훑어 한 봉투면 모델도
+    /// 하나다.
+    /// </para>
+    /// </remarks>
+    public static string Structure(ulong handle) => TakeResultString(rhwp_document_structure(handle));
+
     /// <summary>세션 문서를 HWPX 로 저장한다.</summary>
     /// <param name="handle">문서 핸들.</param>
     /// <param name="outputPath">저장할 경로.</param>
@@ -305,6 +324,9 @@ public static class RhwpSession
 
     [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr rhwp_document_field_anchors(ulong handle);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_structure(ulong handle);
 
     [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr rhwp_document_paste_html(

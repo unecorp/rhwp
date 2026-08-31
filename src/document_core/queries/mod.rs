@@ -8,6 +8,8 @@ pub mod explain;
 // 읽기 전용 질의 모듈이며 `structure`·`rendering` 과 같은 가시성이다.
 pub mod field_query;
 mod form_query;
+// 서식 템플릿 분석을 위한 문서 구조 덤프. 조회 열여덟 개를 한 봉투로 모은다.
+mod structure_dump;
 pub mod hwpctrl_sets;
 pub mod rendering;
 // [#3283] `grep` 이 같은 매칭 규칙(find_matches)을 쓰도록 크레이트 내부 공개.
