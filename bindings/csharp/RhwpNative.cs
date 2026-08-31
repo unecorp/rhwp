@@ -210,6 +210,30 @@ public static class RhwpSession
             handle, section, sourceParagraph, destParagraph, count));
 
     /// <summary>
+    /// 문단 안의 글자 범위를 다른 글자로 바꾼다.
+    /// </summary>
+    /// <param name="handle">문서 핸들.</param>
+    /// <param name="section">구역 인덱스.</param>
+    /// <param name="paragraph">문단 인덱스.</param>
+    /// <param name="charOffset">바꿀 범위의 시작 위치.</param>
+    /// <param name="count">바꿀 글자 수. 0 이면 순수 삽입이다.</param>
+    /// <param name="text">넣을 글자. 빈 문자열이면 순수 삭제다.</param>
+    /// <returns>결과 JSON.</returns>
+    /// <remarks>
+    /// 서식 문서의 글머리 번호를 고쳐 쓰는 데 쓴다. 공공 서식은 자동 번호 매기기를
+    /// 쓰지 않고 번호를 문단의 첫 글자로 직접 넣으므로(<c>"1. "</c>), 문단을 복제하면
+    /// 번호도 그대로 복제된다. 복제본마다 이 함수로 번호만 바꿔 준다.
+    /// <para>
+    /// 새 글자는 <b>바꾸려던 글자와 같은 모양</b>을 물려받는다. 네이티브 쪽이 넣고 나서
+    /// 지우는 순서를 지키기 때문이다 — 반대로 하면 누름틀 표식의 파란색을 뒤집어쓴다.
+    /// </para>
+    /// </remarks>
+    public static string ReplaceText(
+        ulong handle, uint section, uint paragraph, uint charOffset, uint count, string text) =>
+        TakeResultString(rhwp_document_replace_text(
+            handle, section, paragraph, charOffset, count, ToUtf8(text)));
+
+    /// <summary>
     /// 문단을 지운다.
     /// </summary>
     /// <param name="handle">문서 핸들.</param>
@@ -266,6 +290,10 @@ public static class RhwpSession
     [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr rhwp_document_duplicate_paragraph(
         ulong handle, uint section, uint sourceParagraph, uint destParagraph, uint count);
+
+    [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr rhwp_document_replace_text(
+        ulong handle, uint section, uint paragraph, uint charOffset, uint count, byte[] text);
 
     [DllImport(NativeLibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr rhwp_document_delete_paragraph(ulong handle, uint section, uint paragraph);

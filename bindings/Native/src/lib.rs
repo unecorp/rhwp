@@ -339,6 +339,56 @@ pub extern "C" fn rhwp_document_duplicate_paragraph(
     })
 }
 
+/// 문단 안의 글자 범위를 다른 글자로 바꾼다.
+///
+/// 서식 문서의 글머리 번호를 고쳐 쓰는 데 쓴다. 공공 서식은 자동 번호 매기기를
+/// 쓰지 않고 번호를 문단의 첫 글자로 직접 넣으므로("1. "), 문단을 복제하면 번호도
+/// 그대로 복제된다. 복제본마다 이 함수로 번호만 바꿔 준다.
+///
+/// **넣고 나서 지운다 — 순서가 중요하다.** 먼저 지우면 새 글자가 삽입 위치의
+/// 앞 글자에서 모양을 물려받는데, 그 자리가 문단 첫머리이거나 누름틀 표식 옆이면
+/// 엉뚱한 모양(예: 누름틀의 파란색)을 뒤집어쓴다. 바꿀 범위의 끝에 먼저 넣으면
+/// 그 범위 마지막 글자의 모양을 물려받는다 — 즉 바꾸려던 글자와 같은 모양이다.
+#[no_mangle]
+pub extern "C" fn rhwp_document_replace_text(
+    handle: u64,
+    section: u32,
+    paragraph: u32,
+    char_offset: u32,
+    count: u32,
+    text: *const c_char,
+) -> *mut c_char {
+    ffi_result(move || {
+        let text = read_utf8(text, "text")?;
+        session::with(handle, |document| {
+            let section = section as usize;
+            let paragraph = paragraph as usize;
+            let offset = char_offset as usize;
+            let count = count as usize;
+
+            if !text.is_empty() {
+                document
+                    .insert_text_native(section, paragraph, offset + count, &text)
+                    .map_err(|e| format!("글자 삽입 실패 - {}", e))?;
+            }
+
+            if count > 0 {
+                document
+                    .delete_text_native(section, paragraph, offset, count)
+                    .map_err(|e| format!("글자 삭제 실패 - {}", e))?;
+            }
+
+            Ok(format!(
+                "{{\"ok\":true,\"section\":{},\"paragraph\":{},\"removed\":{},\"inserted\":{}}}",
+                section,
+                paragraph,
+                count,
+                text.chars().count()
+            ))
+        })
+    })
+}
+
 /// 문단을 지운다.
 ///
 /// 조립이 끝난 뒤 템플릿의 견본 문단을 걷어내는 데 쓴다. 견본을 남겨 두면 안내문이
@@ -382,13 +432,26 @@ pub extern "C" fn rhwp_document_field_anchors(handle: u64) -> *mut c_char {
                     let index = *occurrence;
                     *occurrence += 1;
 
+                    // 문단의 글자. 채우기 전 견본이라면 이것이 곧 **앞머리**다 —
+                    // 빈 누름틀은 글자를 내놓지 않으므로 `"  □ "` 처럼 글머리표만 남는다.
+                    // 공공 서식은 번호를 이 글자로 직접 들고 있어서(자동 번호가 아니다),
+                    // 복제본의 번호를 고쳐 쓰려면 이 값에서 번호 자리를 찾아야 한다.
+                    let paragraph_text = document
+                        .document()
+                        .sections
+                        .get(info.location.section_index)
+                        .and_then(|section| section.paragraphs.get(info.location.para_index))
+                        .map(|para| para.text.as_str())
+                        .unwrap_or("");
+
                     format!(
-                        "{{\"name\":\"{}\",\"occurrence\":{},\"section\":{},\"paragraph\":{},\"nested\":{}}}",
+                        "{{\"name\":\"{}\",\"occurrence\":{},\"section\":{},\"paragraph\":{},\"nested\":{},\"text\":\"{}\"}}",
                         json_escape(&name),
                         index,
                         info.location.section_index,
                         info.location.para_index,
-                        info.location.nested_path.len()
+                        info.location.nested_path.len(),
+                        json_escape(paragraph_text)
                     )
                 })
                 .collect();
