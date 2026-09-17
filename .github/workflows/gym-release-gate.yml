@@ -1,0 +1,87 @@
+name: Gym Benchmark Audit (Manual)
+
+# Gym은 AI 에이전트가 rhwp CLI/API를 다루는 능력을 조사하는 벤치마크다.
+# 제품 릴리스의 필수 게이트가 아니며 메인테이너가 필요할 때만 수동 실행한다.
+#
+# 릴리스 워크플로 본체(release-binary.yml)는 건드리지 않는다. 하는 일:
+#   1) 현재 커밋에서 rhwp 를 빌드
+#   2) (직전 태그 입력 시) 그 태그 바이너리와 릴리스 차등(#4661) 실행
+#   3) 커밋된 리더보드 해시 체인(#4659) 검증
+#   4) 판정 — regression 만 차단(exit 3), surface-changed 는 리뷰 신호(exit 2)
+#
+# 정직 조항(#4661): 이 게이트는 "무엇이 바뀌었나"를 가리키지 "어느 쪽이 옳은가"를
+# 판정하지 않는다. 그래서 자동 차단은 regression 과 리더보드 체인 파손뿐이다.
+
+on:
+  workflow_dispatch:
+    inputs:
+      old_ref:
+        description: '차등 대상 직전 릴리스 ref(태그/커밋). 비우면 차등 생략.'
+        required: false
+        default: ''
+  # 기존 workflow identity와 계약은 유지하되 태그에서는 job을 실행하지 않는다.
+  # Gym 전건 실행은 아래 job condition에 따라 수동 dispatch만 허용한다.
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gym-release-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Gym Benchmark Audit
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build current rhwp
+        run: cargo build --bin rhwp
+
+      # 판별력 감사 — old/new 비교 이전의 무결성 전제. 벤치마크 자체에 약한
+      # 오라클(일 안 한 제출이 통과하는 false-pass)이 하나라도 있으면 exit 1 로
+      # 릴리스를 차단한다. 표면 변화 판정과 달리 이건 '리뷰 신호'가 아니라 결함이다.
+      - name: Discrimination audit (weak-oracle gate)
+        run: python3 gym/tools/discriminate.py --bin target/debug/rhwp
+
+      - name: Build old rhwp (if ref given)
+        if: ${{ github.event.inputs.old_ref != '' }}
+        run: |
+          git worktree add --detach ../rhwp-old "${{ github.event.inputs.old_ref }}"
+          (cd ../rhwp-old && cargo build --bin rhwp)
+          cp ../rhwp-old/target/debug/rhwp ./rhwp-old-bin
+
+      # 트라젝토리 필요성 감사 — 다단계 과제의 마지막 스텝이 채점에 무의미하면
+      # (부분 트라젝토리가 통과) exit 1 로 릴리스 차단. 종점만 채점하는 게이트가
+      # 놓치는 '트라젝토리 연극'을 골든 경로·judge 없이 잡는 무결성 전제.
+      - name: Trajectory necessity audit (theater gate)
+        run: python3 gym/tools/trajectory.py --bin target/debug/rhwp
+
+      - name: Run release gate
+        id: gate
+        run: |
+          if [ -f ./rhwp-old-bin ]; then
+            python3 gym/tools/release_gate.py \
+              --old ./rhwp-old-bin --new target/debug/rhwp \
+              --github-summary -o gate-verdict.json
+          else
+            python3 gym/tools/release_gate.py \
+              --new target/debug/rhwp \
+              --github-summary -o gate-verdict.json
+          fi
+
+      - name: Upload verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gym-release-gate-verdict
+          path: gate-verdict.json
